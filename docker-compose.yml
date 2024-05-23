@@ -1,0 +1,153 @@
+version: '3.9'
+services:
+  mysql:
+    image: mysql:latest
+    restart: on-failure
+    tty: true
+    env_file: ./.env.dev
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+    ports:
+      - 53306:3306
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - mysql_socket:/var/run/mysqld/
+      - ./mysql/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+      - ./mysql/znote_schema.sql:/docker-entrypoint-initdb.d/znote_schema.sql
+    healthcheck:
+      test: ["CMD", "mysqladmin" ,"ping", "-h", "localhost", "-u", "$$MYSQL_USER", "-p=$$MYSQL_PASSWORD"]
+      timeout: 2s
+      retries: 100
+
+  # Forgotten Server 1.5 config
+  # We're using commit 4558f1da3f38497d0249f48ea7538e2eb8ab955c for forgotten server because I ran into issues during compilation which caused this error:
+  #   [12/14] Building CXX object CMakeFiles/tfs.dir/RelWithDebInfo/src/main.cpp.o
+  #   In file included from /usr/src/forgottenserver/build/src/CMakeFiles/tfslib.dir/Unity/unity_4_cxx.cxx:10:
+  #   /usr/src/forgottenserver/src/luascript.cpp: In member function 'void LuaScriptInterface::registerFunctions()':
+  #   /usr/src/forgottenserver/src/luascript.cpp:1075:6: note: variable tracking size limit exceeded with '-fvar-tracking-assignments', retrying without
+  #   1075 | void LuaScriptInterface::registerFunctions()
+  #   | ^~~~~~~~~~~~~~~~~~
+  #   [13/14] Linking CXX static library src/RelWithDebInfo/libtfslib.a
+  #   [14/14] Linking CXX executable RelWithDebInfo/tfs
+  #
+  # This makes it seem like the build just had a warning and completed, but it actually fails to build the file `/usr/src/forgottenserver/build/tfs`, which causes the second build stage to fail on this line:
+  #   COPY --from=build /usr/src/forgottenserver/build/tfs /bin/tfs
+  #
+  # After trying several times to figure out if it was a docker issue or not, I found that the automated docker build in the repo has been failing for several commits now, and the latest commit where the automated docker build didn't fail was 4558f1da3f38497d0249f48ea7538e2eb8ab955c. Switching to that commit caused the build to "just work," so we're using that for the time being.
+  # See:
+  #   https://github.com/otland/forgottenserver/commits/master/#:R1al5rab:-listview-node-:R3val5rab:
+  #   https://github.com/otland/forgottenserver/compare/4558f1da3f38497d0249f48ea7538e2eb8ab955c...master
+  # forgotten-server:
+  #   image: tfs/4558f1da3f38497d0249f48ea7538e2eb8ab955c
+  #   build: https://github.com/otland/forgottenserver.git#4558f1da3f38497d0249f48ea7538e2eb8ab955c
+  #   restart: on-failure
+  #   tty: true
+  #   env_file: ./.env.dev
+  #   environment:
+  #     MYSQL_HOST: mysql
+  #     MYSQL_SOCK: /var/run/mysqld/
+  #   ports:
+  #     - 7171:7171
+  #     - 7172:7172
+  #   volumes:
+  #     - mysql_socket:/var/run/mysqld/
+  #     - ./forgotten-server/config.lua:/srv/config.lua:ro
+  #   depends_on:
+  #     mysql:
+  #       condition: service_healthy
+  #       restart: true
+  #   links:
+  #     - mysql
+
+  # Forgotten Server 1.4.2 config
+  forgotten-server:
+    image: tfs:v1.4.2
+    build: https://github.com/pschall42/forgottenserver.git#v1.4.2-docker
+    restart: on-failure
+    tty: true
+    ports:
+      - 7171:7171
+      - 7172:7172
+    volumes:
+      - mysql_socket:/var/run/mysqld/
+      - ./forgotten-server/config.lua:/srv/config.lua:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+        restart: true
+    links:
+      - mysql
+
+
+  # https://otland.net/threads/naive-dockerized-tfs-1-5.285261/
+  # https://otland.net/threads/how-to-compile-ot-client-and-server-on-docker-and-wsl-2.275243/
+
+  # This will build the OT Client, but I couldn't get X11 forwarding to work. Good luck if attempting this.
+  # otclient:
+  #   image: otc/manual
+  #   build: https://github.com/pschall42/otclient.git
+  #   # restart: always
+  #   # entrypoint:
+  #   #   - xauth add $${xauth list :$${DISPLAY##*:}} && sh
+  #   # entrypoint: /bin/bash
+  #   # command:
+  #   # depends_on:
+  #   #   - forgotten-server
+  #   privileged: true
+  #   environment:
+  #     DISPLAY: ${DISPLAY}
+  #   network_mode: host
+  #   volumes:
+  #     - /tmp/.X11-unix:/tmp/.X11-unix # Necessary for X forwarding
+  #     # - /usr/lib/x86_64-linux-gnu/libOpenGL.so.0.0.0:/usr/lib/x86_64-linux-gnu/libOpenGL.so.0:ro # Use the host OpenGL, must run `sudo apt install libopengl0`
+  #     # - $HOME/.Xauthority:/root/.Xauthority:rw
+  #     # - /dev/dri:/dev/dri
+  #     # - /dev/snd:/dev/snd
+  #   devices:
+  #     - /dev/dri
+  #     - /dev/snd
+  #     - /dev/null
+
+  # nginx:
+  #   image: nginx:latest
+  #   restart: on-failure
+  #   volumes:
+  #     type: bind
+  #     source: ./proxy/nginx.conf
+  #     target: /etc/nginx/conf.d/default.conf
+  #     read_only: true
+  #   ports:
+  #     - 8080:80
+
+  # Znote for login management
+  znote-aac:
+    image: znote-aac:latest
+    build: ./znote-aac/
+    ports:
+      - 8080:80
+    volumes:
+      - mysql_socket:/var/run/mysqld/
+      - ./znote-aac/config.php:/var/www/html/config.php:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+        restart: true
+
+  # DB manager in case you need it
+  adminer:
+    image: adminer:latest
+    restart: always
+    ports:
+      - 8082:8080
+    links:
+      - mysql
+    depends_on:
+      mysql:
+        condition: service_healthy
+        restart: true
+
+
+volumes:
+  mysql_socket:
+  mysql_data:
+  # mysql_data: ./mysql/data
